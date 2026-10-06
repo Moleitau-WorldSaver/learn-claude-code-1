@@ -1,6 +1,6 @@
 # Learn Claude Code -- 真正的 Agent Harness 工程
 
-[English](./README.md) | [中文](./README-zh.md) | [日本語](./README-ja.md)
+[中文](./README-zh.md)
 
 ## Agency 来自模型，Agent 产品 = 模型 + Harness
 
@@ -381,14 +381,12 @@ flowchart TD
 
 ```
 s08_context_compact/
-  README.md              # 英文，默认章节 README
-  README.zh.md           # 中文译本
-  README.ja.md           # 日文译本
+  README.zh.md           # 中文 README
   code.py                # 独立可运行的实现
   images/                # SVG 图示（需要时）
 ```
 
-阅读 `README.md` 理解核心思想，并逐步学习代码。复杂章节使用 `<details>` 折叠深入内容 -- 想深入时再展开。简单章节有 0-1 张图，复杂章节会有更多。
+阅读 `README.zh.md` 理解核心思想，并逐步学习代码。复杂章节使用 `<details>` 折叠深入内容 -- 想深入时再展开。简单章节有 0-1 张图，复杂章节会有更多。
 
 按顺序从 s01 读到 s17。有些机制直接建立在前一章的运行时之上；独立机制章节会说明它们使用的是哪个较早版本的内核。
 
@@ -399,9 +397,7 @@ s08_context_compact/
 ```
 learn-claude-code/
   s01_agent_loop/          # 每章一个文件夹
-    README.md              #   默认英文文档（完整叙事）
-    README.zh.md           #   中文译本
-    README.ja.md           #   日文译本
+    README.zh.md           #   中文文档
     code.py                #   独立可运行代码
     images/                #   SVG 流程图
   s02_tool_use/

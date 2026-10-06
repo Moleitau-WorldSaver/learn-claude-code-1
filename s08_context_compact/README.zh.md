@@ -1,6 +1,6 @@
 # s08: Context Compact：上下文总会满，先整理，再总结
 
-[English](README.md) · [中文](README.zh.md) · [日本語](README.ja.md)
+[中文](README.zh.md)
 
 s01 → s02 → s03 → s04 → s05 → s06 → s07 → `s08` → [s09](../s09_memory/) → s10 → ... → s16 → s17
 
@@ -306,7 +306,7 @@ python s08_context_compact/code.py
 ### 实验一：较早的结果被替换
 
 ```text
-请读取 s01_agent_loop 到 s05_todo_write 五节课程的 README.md，
+请读取 s01_agent_loop 到 s05_todo_write 五节课程的 README.zh.md，
 比较它们的一级标题，并总结这些标题的命名规律。
 ```
 
