@@ -229,6 +229,7 @@ def summary_hook(messages: list):
             if isinstance(message.get("content"), list)
             else []
         )
+        # 数一下调用的工具个数
         if isinstance(block, dict) and block.get("type") == "tool_result"
     )
     print(f"\033[90m[HOOK] Stop: session used {tool_count} tool calls\033[0m")
@@ -245,7 +246,7 @@ register_hook("Stop", summary_hook)
 def execute_tool(block, handlers: dict) -> str:
     blocked = trigger_hooks("PreToolUse", block)
     if blocked:
-        return str(blocked)
+        return str(blocked) # 如果被拦截了, 就提前退场
 
     handler = handlers.get(block.name)
     try:
@@ -258,7 +259,7 @@ def execute_tool(block, handlers: dict) -> str:
 
 
 # -- New in s06: a nested agent loop with fresh messages --
-
+# 拷贝
 SUB_TOOLS = list(BASE_TOOLS)
 SUB_HANDLERS = dict(BASE_HANDLERS)
 
@@ -277,7 +278,7 @@ def run_subagent(prompt: str) -> str:
     print("\n\033[35m[Subagent started]\033[0m")
     messages = [{"role": "user", "content": prompt}]
 
-    for _ in range(30):
+    for _ in range(30): # 30次长度, 如果没有得到最终答案, 就停止, 返回一个未完成的答案
         response = client.messages.create(
             model=MODEL,
             system=SUB_SYSTEM,
@@ -300,7 +301,7 @@ def run_subagent(prompt: str) -> str:
 
         results = []
         for block in tool_calls:
-            output = execute_tool(block, SUB_HANDLERS)
+            output = execute_tool(block, SUB_HANDLERS) # 这里执行的是子代理的工具, 注意也是一个表
             print(f"  \033[90m[sub] {block.name}: {output[:100]}\033[0m")
             results.append({
                 "type": "tool_result",
@@ -374,9 +375,11 @@ if __name__ == "__main__":
             break
         if query.strip().lower() in ("q", "exit", ""):
             break
+        # 输入hook
         trigger_hooks("UserPromptSubmit", query)
+        # 加入上下文
         history.append({"role": "user", "content": query})
-        agent_loop(history)
+        agent_loop(history) # 循环
         for block in history[-1]["content"]:
             if getattr(block, "type", None) == "text":
                 print(block.text)

@@ -153,27 +153,41 @@ TOOL_HANDLERS = {
 # -- New in s03: three-gate permission pipeline --
 
 # Gate 1: Hard deny list - always forbidden
+# 禁用区, 主要防的是bash这种要权力的东西
 DENY_LIST = ["rm -rf /", "sudo", "shutdown", "reboot", "mkfs", "dd if=", "> /dev/sda"]
 
+# 遍历, 字符串如果有这个禁用命令，我们直接就 return 就行，同时返回提交信息
 def check_deny_list(command: str) -> str | None:
     for pattern in DENY_LIST:
-        if pattern in command:
+        if pattern in command: # 如果命令中包含禁用命令, 就返回提示信息
             return f"Blocked: '{pattern}' is on the deny list"
-    return None
+    return None # 返回None, 后续会检查的, 如果是None, 就说明没有问题, 可以继续执行
 
 
 # Gate 2: Rule matching - context-dependent checks
+# Pattern 对象, 里面装了一条匹配规则, 一句话: 两个边界夹住目标词,只认"真的删东西的命令",不认"长得像的单词"
 DESTRUCTIVE_COMMAND_WORD = re.compile(
+    # 正则:
+    #   (?i)                   忽略大小写,rm/RM/Del/del 都认
+    #   (?:^|[;&|()\n])        左边界:前面是开头或 shell 分隔符
+    #   \s*                    允许命令前的空格
+    #   (?:rm|del)             目标词:Unix/Windows 的删除命令
+    #   (?=\s|$|[;&|()])       右边界:后面是空格/结尾/分隔符(断言,不消耗字符)
     r"(?i)(?:^|[;&|()\n])\s*(?:rm|del)(?=\s|$|[;&|()])"
 )
 
-
+# 匹配, 匹配上返回True，否则就返回False
 def contains_destructive_command(command: str) -> bool:
     return bool(DESTRUCTIVE_COMMAND_WORD.search(command))
 
-
+# 一个列表装了两个字典,每个字典 = 一条规则, 规则掌握了3件事
+# 1 这条规则管哪些工具？
+# 2 它检查的逻辑是什么？检查逻辑用 Lambda 写了一个函数，就是检查的逻辑。如果返回 true 的话，就是违规的。
+# 3 然后违规时呢，我们告诉用户的信息是什么？
 PERMISSION_RULES = [
     {"tools": ["read_file", "write_file", "edit_file"],
+     # 关于读写文件的规则, 主要是防止读写工作区外的文件
+     # 如果文件路径不是工作区的子路径, 就返回违规
      "check": lambda args: not (WORKDIR / args.get("path", "")).resolve().is_relative_to(WORKDIR),
      "message": "Writing outside workspace"},
     {"tools": ["bash"],
@@ -181,7 +195,7 @@ PERMISSION_RULES = [
      any(kw in args.get("command", "") for kw in ["rm ", "> /etc/", "chmod 777"]),
      "message": "Potentially destructive command"},
 ]
-
+# Block 块中的 name 和以及 input的参数传入
 def check_rules(tool_name: str, args: dict) -> str | None:
     for rule in PERMISSION_RULES:
         if tool_name in rule["tools"] and rule["check"](args):
@@ -193,11 +207,12 @@ def check_rules(tool_name: str, args: dict) -> str | None:
 def ask_user(tool_name: str, args: dict, reason: str) -> str:
     print(f"\n\033[33m[permission] {reason}\033[0m")
     print(f"   Tool: {tool_name}({args})")
-    choice = input("   Allow? [y/N] ").strip().lower()
+    choice = input("   Allow? [y/N] ").strip().lower() # 输入并打印这个是否要允许,后面两个是去首尾空白和转小写。
     return "allow" if choice in ("y", "yes") else "deny"
 
 
 # Pipeline: all three gates chained
+# 整个的流程检查
 def check_permission(block) -> bool:
     if block.name == "bash":
         reason = check_deny_list(block.input.get("command", ""))
@@ -228,7 +243,7 @@ def agent_loop(messages: list):
         if not tool_calls:
             return
 
-        results = []
+        results = [] # 里面存的字典, 结果类型，工具id，执行内容
         for block in tool_calls:
             print(f"\033[36m> {block.name}\033[0m")
 
@@ -239,8 +254,10 @@ def agent_loop(messages: list):
                 continue
 
             handler = TOOL_HANDLERS.get(block.name)
+            # 执行工具, 如果有这个工具,就执行,没有就返回Unknown
             output = handler(**block.input) if handler else f"Unknown: {block.name}"
             print(str(output)[:200])
+            # 将工具执行结果存入 results 列表中, 里面是字典, 包含工具id和执行内容
             results.append({"type": "tool_result", "tool_use_id": block.id, "content": output})
 
         messages.append({"role": "user", "content": results})
@@ -261,6 +278,7 @@ if __name__ == "__main__":
             break
         history.append({"role": "user", "content": query})
         agent_loop(history)
+        # Print the last assistant response (if any) in the history
         for block in history[-1]["content"]:
             if getattr(block, "type", None) == "text":
                 print(block.text)

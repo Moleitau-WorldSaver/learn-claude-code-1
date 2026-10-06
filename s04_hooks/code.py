@@ -167,6 +167,7 @@ def permission_hook(block):
             if pattern in command:
                 print(f"\n\033[31m[blocked] '{pattern}'\033[0m")
                 return "Permission denied by deny list"
+        # 找正则匹配, 如果匹配到有风险的命令
         if contains_destructive_command(command) or any(
             kw in command for kw in DESTRUCTIVE
         ):
@@ -175,6 +176,7 @@ def permission_hook(block):
             choice = input("   Allow? [y/N] ").strip().lower()
             if choice not in ("y", "yes"):
                 return "Permission denied by user"
+    # 如果工作区外写入文件, 也提示用户确认
     if block.name in ("read_file", "write_file", "edit_file"):
         path = block.input.get("path", "")
         if not (WORKDIR / path).resolve().is_relative_to(WORKDIR):

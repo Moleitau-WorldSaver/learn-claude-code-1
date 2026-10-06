@@ -123,22 +123,33 @@ class TodoManager:
         self.items: list[dict] = []
 
     def update(self, todos: list | str) -> str:
-        if isinstance(todos, str):
+        # 入口的三个形态:
+        # ① JSON 字符串: [{"content":...}]
+        #② 字面量字符串: [{'content':...}]
+        #③ 直接是列表: [{...}, {...}]  
+        # 三段骨架之一: 解析段
+        if isinstance(todos, str): # 如果是字符串, 尝试转变
             try:
-                todos = json.loads(todos)
-            except json.JSONDecodeError:
+                todos = json.loads(todos) # 转json
+            except json.JSONDecodeError: # 如果json解析失败, 尝试字面量解析, 抛出异常
                 try:
-                    todos = ast.literal_eval(todos)
-                except (SyntaxError, ValueError) as e:
+                    todos = ast.literal_eval(todos) # 转字面量
+                except (SyntaxError, ValueError) as e: 
                     raise ValueError("todos must be a list or JSON array string") from e
 
-        if not isinstance(todos, list):
+        if not isinstance(todos, list): # 如果不是列表, 抛出异常
             raise ValueError("todos must be a list")
-        if len(todos) > 20:
-            raise ValueError("Max 20 todos allowed")
 
-        validated = []
-        in_progress_count = 0
+        # 三段骨架之二: 校验段
+        if len(todos) > 20: # 大于20长度拒收
+            raise ValueError("Max 20 todos allowed")                              
+        #   ├─ 逐项 for 循环:
+        #   │    ├─ 每项是字典吗?
+        #   │    ├─ content 非空吗?
+        #   │    └─ status 合法吗?
+        #   └─ in_progress 最多一个(整体规则)
+        validated = []  # ① 空列表:白名单收集箱
+        in_progress_count = 0 # ② 整数 0:计数器
         for index, todo in enumerate(todos):
             if not isinstance(todo, dict):
                 raise ValueError(f"todos[{index}] must be an object")
@@ -152,29 +163,29 @@ class TodoManager:
             if status == "in_progress":
                 in_progress_count += 1
             validated.append({"content": content, "status": status})
-
+        # 只有一个进行中的, 如果多了就是出错, 报错
         if in_progress_count > 1:
             raise ValueError("Only one todo can be in_progress at a time")
-
-        self.items = validated
-        return self.render()
+        # 骨架第三段: 收尾段
+        self.items = validated # ① 整体替换:旧清单作废,新清单上位
+        return self.render() # ② 渲染交差:把新状态翻译成文字还出去
 
     def render(self) -> str:
-        if not self.items:
+        if not self.items: # 如果是空的, 一句话交差
             return "No todos."
 
-        lines = []
-        for todo in self.items:
+        lines = [] # ② 准备一个"行收集箱"
+        for todo in self.items: # ③ 逐项渲染成一行,装进收集箱
             marker = {
                 "pending": "[ ]",
                 "in_progress": "[>]",
                 "completed": "[x]",
-            }[todo["status"]]
+            }[todo["status"]] #    状态 → 符号
             lines.append(f"{marker} {todo['content']}")
 
-        done = sum(todo["status"] == "completed" for todo in self.items)
+        done = sum(todo["status"] == "completed" for todo in self.items)  # ④ 统计
         lines.append(f"\n({done}/{len(self.items)} completed)")
-        return "\n".join(lines)
+        return "\n".join(lines) # ⑤ 所有行拼成一段文本
 
 
 TODO = TodoManager()
@@ -336,7 +347,8 @@ def agent_loop(messages: list):
 
             results.append({"type": "tool_result", "tool_use_id": block.id,
                             "content": str(output)})
-
+        # 新加内容: 循环末尾做一次判断:本轮用了 todo_write(used_todo 为真)→ 计数器清零;
+        # 没用 → 计数器 +1。累积到 3,就在本轮结果里注入一条提醒文本,然后清零重数。就这么简单。
         rounds_since_todo = 0 if used_todo else rounds_since_todo + 1
         if rounds_since_todo >= 3:
             results.append({"type": "text",

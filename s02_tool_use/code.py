@@ -27,6 +27,7 @@ from pathlib import Path
 
 try:
     import readline
+    # 写终端配置
     readline.parse_and_bind('set bind-tty-special-chars off')
     readline.parse_and_bind('set input-meta on')
     readline.parse_and_bind('set output-meta on')
@@ -37,21 +38,23 @@ except ImportError:
 from anthropic import Anthropic
 from dotenv import load_dotenv
 
+#把 .env 文件里的配置读出来,注入到程序的环境变量
 load_dotenv(override=True)
-if os.getenv("ANTHROPIC_BASE_URL"):
-    os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
+if os.getenv("ANTHROPIC_BASE_URL"): # 判断:环境变量里配了自定义 API 地址吗?
+    os.environ.pop("ANTHROPIC_AUTH_TOKEN", None) # 配了 → 把 ANTHROPIC_AUTH_TOKEN(登陆令牌,与密钥冲突) 删掉
 
-WORKDIR = Path.cwd()
-client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
+WORKDIR = Path.cwd() # 确定工作目录
+client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL")) #构造 SDK 客户端实例
 MODEL = os.environ["MODEL_ID"]
 
+#提示词
 ENVIRONMENT_PROMPT = (
     "Windows: the bash tool runs through cmd.exe; use cmd.exe syntax, not Unix "
     "Bash or PowerShell syntax, and prefer dedicated file tools for file operations"
     if os.name == "nt"
     else "Unix-like: the bash tool runs the system shell"
 )
-
+# 系统提示词
 SYSTEM = (
     f"You are a coding agent at {WORKDIR}. Environment: {ENVIRONMENT_PROMPT}. "
     "Use tools to solve tasks. Act, don't explain."
@@ -67,7 +70,7 @@ def run_bash(command: str) -> str:
     try:
         r = subprocess.run(command, shell=True, cwd=WORKDIR,
                            capture_output=True, text=True, errors="replace",
-                           timeout=120)
+                           timeout=120) # # bash 在这个工作目录里执行命令
         out = (r.stdout + r.stderr).strip()
         return out[:50000] if out else "(no output)"
     except subprocess.TimeoutExpired:
@@ -79,8 +82,8 @@ def run_bash(command: str) -> str:
 # -- New in s02: four tools --
 
 def safe_path(p: str) -> Path:
-    path = (WORKDIR / p).resolve()
-    if not path.is_relative_to(WORKDIR):
+    path = (WORKDIR / p).resolve() # 文件路径按相对 WORKDIR 解析
+    if not path.is_relative_to(WORKDIR): # 越界的路径(如 ../ 逃出去)会被拦下
         raise ValueError(f"Path escapes workspace: {p}")
     return path
 
@@ -177,9 +180,12 @@ def agent_loop(messages: list):
         results = []
         for block in tool_calls:
             print(f"\033[33m> {block.name}\033[0m")
+            # 拿取对应的函数名
             handler = TOOL_HANDLERS.get(block.name)
+            # 如果有对应的函数,就调用它,否则返回 "Unknown: {block.name}"
+            # 关键:使用**对字典进行解包,将字典中的键值对作为关键字参数传递给函数
             output = handler(**block.input) if handler else f"Unknown: {block.name}"
-            print(str(output)[:200])
+            print(str(output)[:200])# 给人看200就行了
             results.append({"type": "tool_result", "tool_use_id": block.id, "content": output})
 
         messages.append({"role": "user", "content": results})
@@ -193,14 +199,19 @@ if __name__ == "__main__":
     while True:
         try:
             # \001/\002 tell Readline the ANSI escapes have zero display width.
+            # 让询问更好看一点, 颜色什么的
             query = input("\001\033[36m\002s02 >> \001\033[0m\002")
+        # 输入 Ctrl+D 或 Ctrl+C 时, 退出循环
         except (EOFError, KeyboardInterrupt):
             break
+        # 如果输入是 q, exit 或 空字符串, 就退出循环, 支持三种退出模式
         if query.strip().lower() in ("q", "exit", ""):
             break
+        # 将用户输入的内容添加到历史记录中, 以便下一轮循环使用
         history.append({"role": "user", "content": query})
         agent_loop(history)
         for block in history[-1]["content"]:
+            # 如果是text文本类型, 就打印出来, 让用户看到模型的回答(如果找不到属性的具体类型才返回None, 通常遇不到,为意外做准备)
             if getattr(block, "type", None) == "text":
                 print(block.text)
         print()
