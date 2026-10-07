@@ -40,7 +40,7 @@ import glob
 import json
 import os
 import re
-import subprocess
+import subprocess 
 import uuid
 from pathlib import Path
 
@@ -252,12 +252,12 @@ def execute_tool(block) -> str:
 # -- Context compaction --
 
 class ContextCompactor:
-    CONTEXT_CHAR_LIMIT = 50000
-    TOOL_RESULT_BATCH_CHAR_LIMIT = 200000
-    LARGE_RESULT_CHAR_LIMIT = 30000
-    SUMMARY_INPUT_CHAR_LIMIT = 80000
-    KEEP_RECENT_RESULTS = 3
-    KEEP_RECENT_MESSAGES = 5
+    CONTEXT_CHAR_LIMIT = 50000 # 全量上下文警戒线
+    TOOL_RESULT_BATCH_CHAR_LIMIT = 200000 # 工具结果批量总量警戒线
+    LARGE_RESULT_CHAR_LIMIT = 30000 # 单个工具结果警戒线
+    SUMMARY_INPUT_CHAR_LIMIT = 80000 # 摘要输入警戒线
+    KEEP_RECENT_RESULTS = 3 # 最近 3 条已读结果不碰
+    KEEP_RECENT_MESSAGES = 5 # 补救时,最近 5 条消息原样保留
 
     def __init__(self, llm_client, model: str, transcript_dir: Path, tool_results_dir: Path):
         self.client = llm_client
@@ -265,15 +265,15 @@ class ContextCompactor:
         self.transcript_dir = transcript_dir
         self.tool_results_dir = tool_results_dir
 
-    @staticmethod
-    def estimate_chars(messages: list) -> int:
+    @staticmethod # 这个函数计算总上下文
+    def estimate_chars(messages: list) -> int: 
         return len(json.dumps(messages, default=str, ensure_ascii=False))
 
-    @staticmethod
+    @staticmethod # 这个函数获取块的类型
     def block_type(block):
         return block.get("type") if isinstance(block, dict) else getattr(block, "type", None)
 
-    @classmethod
+    @classmethod # 这个函数判断是否有工具使用
     def has_tool_use(cls, message: dict) -> bool:
         content = message.get("content")
         return (
@@ -282,7 +282,7 @@ class ContextCompactor:
             and any(cls.block_type(block) == "tool_use" for block in content)
         )
 
-    @staticmethod
+    @staticmethod # 这个函数判断是否为工具结果
     def is_tool_result(message: dict) -> bool:
         content = message.get("content")
         return (
@@ -292,6 +292,7 @@ class ContextCompactor:
                     for block in content)
         )
 
+    # 这个函数返回"未读结果的位置集合",它是压缩管线的禁碰清单
     @staticmethod
     def unseen_tool_result_positions(messages: list) -> set[tuple[int, int]]:
         """Return results added since the model's most recent response."""
@@ -302,13 +303,15 @@ class ContextCompactor:
         )
         return {
             (message_index, block_index)
+            # 从分界线开始, 扫到末尾, 都是未读的
             for message_index in range(last_assistant + 1, len(messages))
-            if messages[message_index].get("role") == "user"
-            and isinstance(messages[message_index].get("content"), list)
+            if messages[message_index].get("role") == "user" # 是用户消息
+            and isinstance(messages[message_index].get("content"), list) # 且是列表
+            # block_index拿具体的索引, 只要是工具结果就加入集合
             for block_index, block in enumerate(messages[message_index]["content"])
             if isinstance(block, dict) and block.get("type") == "tool_result"
         }
-
+    # 这个函数把消息写成jsonl文件, 返回路径
     def write_transcript(self, messages: list) -> Path:
         self.transcript_dir.mkdir(parents=True, exist_ok=True)
         path = self.transcript_dir / f"transcript_{uuid.uuid4().hex}.jsonl"
@@ -316,7 +319,8 @@ class ContextCompactor:
             for message in messages:
                 transcript.write(json.dumps(message, default=str, ensure_ascii=False) + "\n")
         return path
-
+    
+    # 这个函数从工具结果中提取出持久化的输出路径, 如果没有就返回None
     def persisted_output_path(self, output: str) -> str | None:
         candidate = None
         if output.startswith("<persisted-output>\n"):
@@ -336,7 +340,7 @@ class ContextCompactor:
                 or not path.is_file()):
             return None
         return str(path)
-
+    # 这个函数把工具结果写成txt文件, 返回路径
     def save_output(self, tool_use_id: str, output: str) -> Path:
         self.tool_results_dir.mkdir(parents=True, exist_ok=True)
         safe_id = re.sub(r"[^A-Za-z0-9._-]", "_", str(tool_use_id))[:120] or "unknown"
@@ -344,6 +348,7 @@ class ContextCompactor:
         path.write_text(output, encoding="utf-8")
         return path
 
+    # 这个函数返回持久化输出的预览, 如果已经持久化就读取文件, 否则就写入文件
     def persisted_preview(self, tool_use_id: str, output: str,
                           preview_chars: int = 2000) -> str:
         saved_path = self.persisted_output_path(output)
@@ -355,36 +360,45 @@ class ContextCompactor:
             except OSError:
                 preview = output[:preview_chars]
         else:
-            path = self.save_output(tool_use_id, output)
+            path = self.save_output(tool_use_id, output) 
             preview = output[:preview_chars]
         return (f"<persisted-output>\nFull output: {path}\n"
                 f"Preview:\n{preview}\n</persisted-output>")
-
+    # 这个函数判断输出是否过大, 如果过大就持久化, 否则就返回原输出
     def persist_large_output(self, tool_use_id: str, output: str) -> str:
         if len(output) <= self.LARGE_RESULT_CHAR_LIMIT:
             return output
         return self.persisted_preview(tool_use_id, output)
 
+    # 管线1: 这个函数对工具结果进行预算, 如果总量过大就持久化部分结果
     def tool_result_budget(self, messages: list, max_chars: int | None = None) -> list:
-        if not messages:
-            return messages
-        content = messages[-1].get("content")
+        if not messages: 
+            return messages # 如果消息列表为空, 直接返回
+        content = messages[-1].get("content") # 取最后一条消息的内容
         if messages[-1].get("role") != "user" or not isinstance(content, list):
-            return messages
+            return messages # 如果最后一条消息不是用户消息或者内容不是列表, 直接返回
+                            # 因为这个管线只对最新一批工具结果, 进行处理, 而这个结果都是用户信息和列表
+
+        # 拿出所有处理的block块(类型: tool_result)
         blocks = [block for block in content
                   if isinstance(block, dict) and block.get("type") == "tool_result"]
-        limit = max_chars or self.TOOL_RESULT_BATCH_CHAR_LIMIT
-        total = sum(len(str(block.get("content", ""))) for block in blocks)
+        limit = max_chars or self.TOOL_RESULT_BATCH_CHAR_LIMIT #正常取参数中的max_chars, 如果为None, 才取后面的
+        total = sum(len(str(block.get("content", ""))) for block in blocks) # 计算总长度
+
+        # 由大到小排序, 先处理大的, 直到总长度小于等于限制
+        # 两个条件: 1. 总长度小于等于限制, 2. 当前块的长度小于等于单个结果限制, 都满足就跳过
         for block in sorted(blocks, key=lambda item: len(str(item.get("content", ""))), reverse=True):
             if total <= limit:
                 break
             output = str(block.get("content", ""))
             if len(output) <= self.LARGE_RESULT_CHAR_LIMIT:
                 continue
+            # 替换, 把大内容存到磁盘上, 只在消息里留个地址, 小的就原文(函数自保证)
             block["content"] = self.persist_large_output(block.get("tool_use_id", "unknown"), output)
-            total = sum(len(str(item.get("content", ""))) for item in blocks)
+            total = sum(len(str(item.get("content", ""))) for item in blocks) # 重新计算总长度
         return messages
-
+    
+    # 这个函数判断消息是否是归档标记, 如果是就返回True, 否则返回False
     def is_archive_marker(self, message: dict) -> bool:
         content = message.get("content")
         match = (re.fullmatch(r"\[\d+ messages archived at (.+)\]", content)
@@ -395,27 +409,33 @@ class ContextCompactor:
         return (path.resolve().is_relative_to(self.transcript_dir.resolve())
                 and path.is_file())
 
+    # 管线2: 这个函数对消息列表进行剪裁, 保留指定数量的消息
     def snip_compact(self, messages: list, max_messages: int = 50) -> list:
         if len(messages) <= max_messages:
             return messages
-        head_end = 3
+        head_end = 3 # 默认开始头
         tail_start = len(messages) - (max_messages - head_end - 1)
         if self.has_tool_use(messages[head_end - 1]):
-            while head_end < tail_start and self.is_tool_result(messages[head_end]):
-                head_end += 1
+            while head_end < tail_start and self.is_tool_result(messages[head_end]): # 验证当前头是不是工具调用结果
+                head_end += 1 # 如果是, 就把头部延长, 直到不是工具调用为止, 也就是说现在这个头的下标是工具调用结果的index + 1
+
+        # 共同不变式:切点不劈开任何一对 tool_use/tool_result
+        # 头的不变式: 头里的 tool_use,结果一定也在头里
+        # 尾巴第一条通常是带 tool_use 的 assistant
         if (tail_start > 0 and self.is_tool_result(messages[tail_start])
                 and self.has_tool_use(messages[tail_start - 1])):
             tail_start -= 1
         if head_end >= tail_start:
-            return messages
-        middle = messages[head_end:tail_start]
+            return messages # 如果头尾交错了, 就不剪裁了, 直接返回原消息列表
+        middle = messages[head_end:tail_start] # 切
         if len(middle) == 1 and self.is_archive_marker(middle[0]):
-            return messages
-        transcript_path = self.write_transcript(messages)
+            return messages # 如果中间只有一条消息, 且是归档标记, 就不剪裁了, 直接返回原消息列表
+        transcript_path = self.write_transcript(messages) # 落盘
         marker = {"role": "user", "content":
-                  f"[{tail_start - head_end} messages archived at {transcript_path}]"}
-        return [*messages[:head_end], marker, *messages[tail_start:]]
+                  f"[{tail_start - head_end} messages archived at {transcript_path}]"} # 货单
+        return [*messages[:head_end], marker, *messages[tail_start:]] # 切好
 
+    # 管线3: 这个函数对消息列表进行微剪裁, 保留指定字符数的消息
     def micro_compact(self, messages: list,
                       target_chars: int | None = None) -> list:
         results = [
@@ -425,20 +445,26 @@ class ContextCompactor:
             for block_index, block in enumerate(message["content"])
             if isinstance(block, dict) and block.get("type") == "tool_result"
         ]
+        # 通过这个函数将白名单拿出, 也就是未读的工具结果, 这些不参与压缩
         unseen = self.unseen_tool_result_positions(messages)
+
+        # 寻找没有在白名单中的工具结果, 也就是已读的工具结果
         consumed = [entry for entry in results if entry[:2] not in unseen]
-        for _, _, block in consumed[:-self.KEEP_RECENT_RESULTS]:
+        for _, _, block in consumed[:-self.KEEP_RECENT_RESULTS]:#  最近 3 条已读结果不碰
+            # 这里也是两个, 超过阈值 和 单次已读结果大小超120
             if (target_chars is not None
                     and self.estimate_chars(messages) <= target_chars):
                 break
             content = str(block.get("content", ""))
             if len(content) <= 120:
                 continue
+            # 落盘前检验
             saved_path = self.persisted_output_path(content)
             if not saved_path:
                 saved_path = str(self.save_output(
-                    block.get("tool_use_id", "unknown"), content))
-            block["content"] = f"[Earlier tool result saved at {saved_path}]"
+                    block.get("tool_use_id", "unknown"), content)) # 把工具id当成文件名, 内容当正文
+            # 然后用地址当成原来的内容, 相当于把大内容存到磁盘上, 只在消息里留个地址
+            block["content"] = f"[Earlier tool result saved at {saved_path}]"  # 信息压缩
         return messages
 
     def fit_tool_results(self, messages: list, target_chars: int) -> list:
@@ -449,16 +475,19 @@ class ContextCompactor:
             for block in message["content"]
             if isinstance(block, dict) and block.get("type") == "tool_result"
         ]
+        # 把这个results 按照从大到小排序
         for block in sorted(
                 results,
                 key=lambda item: len(str(item.get("content", ""))),
                 reverse=True):
+            # 如果阈值好了, break
             if self.estimate_chars(messages) <= target_chars:
                 break
+            # 造替换品, 压缩
             output = str(block.get("content", ""))
-            replacement = self.persisted_preview(
+            replacement = self.persisted_preview( # 替换成地址 + 预览
                 block.get("tool_use_id", "unknown"), output, preview_chars=1000)
-            if len(replacement) < len(output):
+            if len(replacement) < len(output): # 只有替换品更短时, 才换,保险
                 block["content"] = replacement
         return messages
 
@@ -466,8 +495,8 @@ class ContextCompactor:
         conversation = json.dumps(messages, default=str, ensure_ascii=False)
         if len(conversation) <= self.SUMMARY_INPUT_CHAR_LIMIT:
             return conversation
-        head = self.SUMMARY_INPUT_CHAR_LIMIT // 4
-        tail = self.SUMMARY_INPUT_CHAR_LIMIT - head
+        head = self.SUMMARY_INPUT_CHAR_LIMIT // 4 # 头两万
+        tail = self.SUMMARY_INPUT_CHAR_LIMIT - head # 尾六万
         return (conversation[:head]
                 + "\n...[middle omitted; full transcript is on disk]...\n"
                 + conversation[-tail:])
@@ -487,6 +516,7 @@ class ContextCompactor:
                             if getattr(block, "type", None) == "text").strip()
         return summary or "(empty summary)"
 
+    # 把文本(四样零件)拼成一条消息字典
     @staticmethod
     def summary_message(label: str, request: str, summary: str, transcript: Path) -> dict:
         return {"role": "user", "content": (
@@ -495,6 +525,7 @@ class ContextCompactor:
             f"Full transcript: {transcript}"
         )}
 
+    #  管线4: 总结历史摘要(全文落盘, 打印路径, 总结成字符串, 拼消息)
     def compact_history(self, messages: list, active_request: str) -> list:
         transcript = self.write_transcript(messages)
         print(f"[transcript saved: {transcript}]")

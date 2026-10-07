@@ -39,8 +39,8 @@ from anthropic import Anthropic
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
-if os.getenv("ANTHROPIC_BASE_URL"):
-    os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
+if os.getenv("ANTHROPIC_BASE_URL"): # 如果配了自定义 API 地址
+    os.environ.pop("ANTHROPIC_AUTH_TOKEN", None) # 删掉登录令牌，避免冲突
 
 WORKDIR = Path.cwd()
 SKILLS_DIR = WORKDIR / "skills"
@@ -62,56 +62,64 @@ class SkillLoader:
         self.skills: dict[str, dict[str, str]] = {}
         self.scan()
 
+    # 将文本分为 frontmatter 和正文，返回元数据字典和正文字符串
     @staticmethod
     def parse_frontmatter(text: str) -> tuple[dict, str]:
-        lines = text.splitlines(keepends=True)
-        if not lines or lines[0].rstrip("\r\n") != "---":
+        lines = text.splitlines(keepends=True) # 全文按行切成列表
+        if not lines or lines[0].rstrip("\r\n") != "---":# 如果第一行不是 "---"，说明没有 frontmatter
             return {}, text
 
+        # 找结尾的 ---
         closing_index = next(
             (index for index, line in enumerate(lines[1:], start=1)
              if line.rstrip("\r\n") == "---"),
             None,
         )
-        if closing_index is None:
+        if closing_index is None: # 没有结尾, 全文当正文
             return {}, text
 
-        frontmatter = "".join(lines[1:closing_index])
-        body = "".join(lines[closing_index + 1:]).strip()
+        frontmatter = "".join(lines[1:closing_index]) # frontmatter 是开头和结尾之间的内容
+        body = "".join(lines[closing_index + 1:]).strip() # 正文是结尾之后的内容
         try:
-            metadata = yaml.safe_load(frontmatter) or {}
+            metadata = yaml.safe_load(frontmatter) or {} # 把元数据区解析成字典
         except yaml.YAMLError:
             metadata = {}
-        if not isinstance(metadata, dict):
+        if not isinstance(metadata, dict): # 解析出非字典?
             metadata = {}
         return metadata, body
 
-    def scan(self):
+    # 扫描 skills 目录下的所有 SKILL.md 文件，提取技能名称、描述和内容，并存储在 self.skills 字典中
+    def scan(self): 
         self.skills.clear()
         if not self.skills_dir.exists():
             return
 
+        # 获取 skills 目录的绝对路径，方便后续检查 SKILL.md 是否在该目录下
         skills_root = self.skills_dir.resolve()
+        # 遍历 skills 目录下的所有 SKILL.md 文件，按字母顺序排序
         for manifest in sorted(self.skills_dir.glob("*/SKILL.md")):
-            if (not manifest.is_file()
-                    or not manifest.resolve().is_relative_to(skills_root)):
+            if (not manifest.is_file() #检查是否是文件,可能有叫 SKILL.md 的文件夹,从而出错
+                    or not manifest.resolve().is_relative_to(skills_root)): # 检查是否在 skills 目录下
                 continue
-            content = manifest.read_text(encoding="utf-8")
-            metadata, body = self.parse_frontmatter(content)
+            content = manifest.read_text(encoding="utf-8") # 把整个 SKILL.md 文件读成一段字符串,存进 content
+            metadata, body = self.parse_frontmatter(content) # 切成两部分
+            # 技能名字
             raw_name = metadata.get("name")
             name = raw_name.strip() if isinstance(raw_name, str) else ""
             name = name or manifest.parent.name
+            # 地址
             raw_description = metadata.get("description")
             description = (raw_description.strip()
                            if isinstance(raw_description, str) else "")
             description = description or body.split("\n", 1)[0]
             description = " ".join(str(description).lstrip("# ").split())
+            # 存进字典
             self.skills[name] = {
                 "name": name,
                 "description": description,
                 "content": content,
             }
-
+    # 返回技能目录的字符串表示，每行一个技能，格式为 "- name: description"
     def catalog(self) -> str:
         if not self.skills:
             return "(no skills found)"
@@ -119,7 +127,7 @@ class SkillLoader:
             f"- {skill['name']}: {skill['description']}"
             for skill in self.skills.values()
         )
-
+    # 根据技能名称加载技能内容，如果技能不存在，则返回错误信息和可用技能列表
     def load(self, name: str) -> str:
         skill = self.skills.get(name)
         if skill:
@@ -130,7 +138,7 @@ class SkillLoader:
 
 SKILL_LOADER = SkillLoader(SKILLS_DIR)
 
-
+# 系统提示词也随之加上技能描述
 def build_system_prompt() -> str:
     return (
         f"You are a coding agent at {WORKDIR}. Environment: {ENVIRONMENT_PROMPT}. "
