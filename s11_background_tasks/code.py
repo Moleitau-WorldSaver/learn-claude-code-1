@@ -57,10 +57,13 @@ SYSTEM = (
 
 # -- From s04: tool implementations --
 
-_shell_processes: set[subprocess.Popen] = set()
-_shell_process_lock = threading.RLock()
-
-
+# 等价于 _shell_processes = set()
+# 初始化一个集合, 里面装Popen对象, 变量名字是_shell_processes
+_shell_processes: set[subprocess.Popen] = set() 
+# 创造一个RLock 锁的对象, 对象名是_shell_process_lock
+_shell_process_lock = threading.RLock() 
+ 
+# 停止子进程(停止harness起的进程)
 def _stop_process_group(process: subprocess.Popen):
     """Stop a shell process and its children (cross-platform).
 
@@ -69,17 +72,19 @@ def _stop_process_group(process: subprocess.Popen):
     ``Popen.terminate()`` / ``Popen.kill()``.
     """
     if os.name == "nt":
-        for stop in (process.terminate, process.kill):
-            if process.poll() is not None:
+        # # 目标：把一个 shell 进程【连同它启动的子孙】尽量收掉
+        # # 手段：先礼后兵（terminate/SIGTERM → kill/SIGKILL），每步都先确认 + 吞掉异常
+        for stop in (process.terminate, process.kill): 
+            if process.poll() is not None: # # 已经死了就别碰（幂等）
                 return
             try:
                 stop()
-            except OSError:
-                return
+            except OSError: # # 进程没了/没权限 → 认了, 为什么认? 干活失败 → 要响亮, 收尾失败 → 要安静
+                return 
             try:
-                process.wait(timeout=0.05)
+                process.wait(timeout=0.05) # # 给 0.05 秒体面地死
             except subprocess.TimeoutExpired:
-                continue
+                continue #  # 没死？换更强的一招
         return
 
     # SIGKILL is POSIX-only; fall back to SIGTERM on platforms without it.
@@ -90,60 +95,74 @@ def _stop_process_group(process: subprocess.Popen):
             return
         time.sleep(0.05)
 
-
+# 停止所有子进程
 def _stop_all_shell_processes():
     with _shell_process_lock:
+        # 锁里抄一份完整名单：抄的时候不许别人动这个 set
         processes = list(_shell_processes)
     for process in processes:
         _stop_process_group(process)
 
-
+# 以后我收到 SIGTERM，别用默认的'立刻死'，改成调用我写的这个函数
 def _handle_termination_signal(signum, _frame):
     _stop_all_shell_processes()
-    raise SystemExit(128 + signum)
+    # 我收拾完了，现在退出；退出码写成 143，告诉外面我是被 15 号信号请走的。
+    raise SystemExit(128 + signum) # 128 + N 是 Unix 惯例：被第 N 号信号杀死 → 退出码写 128 + N
 
-
+#登记一下: 程序退出执行这个函数
 atexit.register(_stop_all_shell_processes)
+# 登记一下：以后收到 SIGTERM，就调用这个函数。
 signal.signal(signal.SIGTERM, _handle_termination_signal)
 
-
+# # 同步跑一条命令：起子进程 → 登记 → 等它（最多 120 秒）→ 返回 (它说了什么, 它是怎么结束的)
+#! 子进程只跑命令, 模型并没有进入子进程
 def _run_bash_process(command: str) -> tuple[str, int | None]:
     process = None
     try:
         # start_new_session (setsid) exists only on POSIX; skip it on Windows.
+        # 按平台准备一份额外的启动参数：非 Windows 就要求子进程"自立门户"（新会话／新进程组），Windows 则什么都不加。
         popen_kwargs = {} if os.name == "nt" else {"start_new_session": True}
+        # 真正启动那个子进程：交给系统 shell 执行这条命令、在指定目录跑、把它的输出接进管道，
+        # 然后立刻返回一个代表它的 Popen 对象（不等它结束）
+        # 一句话: 创造子进程, 返回Popen对象管理
         process = subprocess.Popen(
             command,
             shell=True,
             cwd=WORKDIR,
-            stdout=subprocess.PIPE,
+            stdout=subprocess.PIPE,# 两行, 输出管子
             stderr=subprocess.PIPE,
             text=True, errors="replace",
             **popen_kwargs,
         )
         with _shell_process_lock:
-            _shell_processes.add(process)
-        stdout, stderr = process.communicate(timeout=120)
-        output = (stdout + stderr).strip()
+            _shell_processes.add(process) # 填进进程set中, 里面存了好多Popen对象
+
+        # 数据来的过程是流式的；但 output 是一次性拿到整块的。
+        # 也就是说只要子进程在运行, 我们就一直卡在communicate这里, 流式拿信息
+        stdout, stderr = process.communicate(timeout=120) # 把输出读干净, 最多等120s
+        output = (stdout + stderr).strip() # 去掉首尾的空白
+
+        # # 输出超 5 万字符就截断、空白就用占位；接上退出码，一起打包成元组返回
         return (output[:50000] if output else "(no output)"), process.returncode
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired: # 超时
         return "Error: Timeout (120s)", None
-    except OSError as error:
+    except OSError as error: # 子进程根本没起来
         return f"Error: {type(error).__name__}: {error}", None
-    finally:
+    finally:# 无论如何都要走的收尾
         if process is not None:
-            _stop_process_group(process)
+            _stop_process_group(process) # 直接停
             try:
-                process.wait(timeout=0.2)
+                process.wait(timeout=0.2) # 确认
             except subprocess.TimeoutExpired:
                 pass
             with _shell_process_lock:
-                _shell_processes.discard(process)
+                _shell_processes.discard(process) # 在set中划掉
 
-
+# return 0代表正常, 正常输出
 def _format_bash_result(output: str, exit_code: int | None) -> str:
     if exit_code in (0, None):
         return output
+    # 不正常, 错误行 + 原来输出
     return f"Error: command exited with status {exit_code}\n{output}"
 
 
@@ -344,35 +363,40 @@ def call_tool(block) -> str:
 
 
 # -- New in s11: background execution --
-
+# 只管理后台任务的类
 class BackgroundManager:
     def __init__(self):
         self.tasks: dict[str, dict] = {}
         self.results: dict[str, str] = {}
         self._ready: list[str] = []
-        self._counter = 0
+        self._counter = 0 # 发号器
         self._lock = threading.Lock()
 
+    # 用block块来起线程, 跑子进程任务, 返回的是任务id
     def start(self, block) -> str:
-        if block.name != "bash":
+        if block.name != "bash": # 只允许bash
             raise ValueError("Only Bash commands can run in the background")
         command = block.input.get("command")
-        if not isinstance(command, str) or not command.strip():
+        if not isinstance(command, str) or not command.strip(): # 检查类型对不对 + 内容是不是空的
             raise ValueError("Bash command cannot be empty")
-
-        with self._lock:
-            self._counter += 1
-            task_id = f"bg_{self._counter:04d}"
-            self.tasks[task_id] = {
+        
+        # 后台要同时跑多条命令 -> 每条命令一条线程, 之后这个线程会执行创建Popen,然后起进程
+        # 于是这本账会被两种线程碰：主线程负责发号/登记/取走，后台线程负责回写状态和结果
+        # 碰的是同一份数据（tasks / _ready / _counter）-> 用锁
+        with self._lock: 
+            self._counter += 1 # 发号
+            # 登记
+            task_id = f"bg_{self._counter:04d}" 
+            self.tasks[task_id] = { 
                 "tool_use_id": block.id,
                 "command": command,
                 "status": "running",
             }
-
+        # 起一个线程, 用来创建子进程任务
         thread = threading.Thread(
-            target=self._run,
-            args=(task_id, command),
-            daemon=True,
+            target=self._run, # 线程跑起来立马调用这个函数
+            args=(task_id, command), # 传给那个函数的参数(必须写成元组)
+            daemon=True, # 守护线程标志(也就是说主程序退出了, 直接掐灭这个,程序不等)
         )
         try:
             thread.start()
@@ -385,33 +409,36 @@ class BackgroundManager:
 
     def _run(self, task_id: str, command: str):
         try:
+            # 跑bash命令, 拿结果
             output, exit_code = _run_bash_process(command)
             result = _format_bash_result(output, exit_code)
+            # 如果是返回0的状态跑完, 任务就是顺利完成
             status = "completed" if exit_code == 0 else "failed"
         except Exception as error:
             result = f"Error: {type(error).__name__}: {error}"
             status = "failed"
 
+        # 将结果传送出去
         with self._lock:
             task = self.tasks.get(task_id)
             if task is None:
                 return
             task["status"] = status
             self.results[task_id] = result
-            self._ready.append(task_id)
+            self._ready.append(task_id) # _ready里放待通知队列(放着已经跑完, 还没通知模型的任务编号)
 
     def collect(self) -> list[str]:
-        with self._lock:
+        with self._lock: # 从锁里取件
             ready = []
-            for task_id in self._ready:
-                task = self.tasks.pop(task_id, None)
-                result = self.results.pop(task_id, "")
+            for task_id in self._ready: # # 遍历"可取件"清单
+                task = self.tasks.pop(task_id, None) # 从登记本上摘下来（连记录一起删）
+                result = self.results.pop(task_id, "") # # 把结果也取走
                 if task is not None:
-                    ready.append((task_id, task, result))
-            self._ready.clear()
+                    ready.append((task_id, task, result)) # 存着大量信息
+            self._ready.clear() # 清空
 
         notifications = []
-        for task_id, task, result in ready:
+        for task_id, task, result in ready: # 将信息塞到文本中, 返回
             notifications.append(
                 f"<task_notification>\n"
                 f"  <task_id>{task_id}</task_id>\n"
@@ -428,11 +455,11 @@ BACKGROUND = BackgroundManager()
 background_tasks = BACKGROUND.tasks
 background_results = BACKGROUND.results
 
-
+# 拿工具调用块的name, 和 input的参数
 def should_run_background(tool_name: str, tool_input: dict) -> bool:
     return (
-        tool_name == "bash"
-        and tool_input.get("run_in_background") is True
+        tool_name == "bash" # ① 必须是 bash 工具
+        and tool_input.get("run_in_background") is True # ② 取出run_in_background这一项 且 这一项是True
     )
 
 
@@ -443,7 +470,7 @@ def start_background_task(block) -> str:
 def collect_background_results() -> list[str]:
     return BACKGROUND.collect()
 
-
+# 当通过后台管理任务的类，里的具体收集函数拿到的文本，塞到模型里。
 def inject_background_results(messages: list) -> int:
     notifications = collect_background_results()
     if not notifications:
@@ -489,7 +516,7 @@ def execute_tool(block) -> str:
 
 def agent_loop(messages: list):
     while True:
-        inject_background_results(messages)
+        inject_background_results(messages) # 塞模型里对话
         response = client.messages.create(
             model=MODEL,
             system=SYSTEM,
