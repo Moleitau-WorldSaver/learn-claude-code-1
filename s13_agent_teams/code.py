@@ -1833,8 +1833,8 @@ def print_last_assistant_message(history: list):
             print(block.get("text", ""))
 
 
-def wait_for_cli_event() -> tuple[str, str | None]:
-    prompt_visible = False
+def wait_for_cli_event() -> tuple[str, str | None]:  # 返回的第一个是字符串, 第二个是字符串或者空
+    prompt_visible = False # 记录是否出现 提示符 s13 >>
     while True:
         if BUS.peek("lead"):
             if prompt_visible:
