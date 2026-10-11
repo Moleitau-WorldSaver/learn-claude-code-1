@@ -63,8 +63,11 @@ _task_store_state = threading.local()
 
 # owner -> {"task_id": str, "cwd": Path}. A teammate gets one assignment at
 # a time, and every filesystem tool resolves its cwd through this registry.
-teammate_assignments: dict[str, dict[str, object]] = {}
-assignment_versions: dict[str, int] = {}
+teammate_assignments: dict[str, dict[str, object]] = {}  # 只管占用关系, 存线程的拥有者 -> {占用了哪条任务, 干活时的工作目录}
+
+# 工作世代计数器, 每个执行者的「工作世代号」。 
+# 每次认领/释放就 +1，给审批打上"这一任"的标记； 审批时拿 (版本号, task_id) 一比 —— 对不上的就是过期审批，直接作废。
+assignment_versions: dict[str, int] = {} 
 
 
 @contextmanager
@@ -88,11 +91,11 @@ def task_store_lock():
                 handle.close()
                 del _task_store_state.handle
 
-
+# 作废传入参数的动手的权力(禁用bash, write, edit等工具)
 def advance_assignment_version(owner: str):
     """Invalidate old approvals without clearing an explicit plan requirement."""
     with task_lock:
-        assignment_versions[owner] = assignment_versions.get(owner, 0) + 1
+        assignment_versions[owner] = assignment_versions.get(owner, 0) + 1 # 
         gates = globals().get("plan_gates")
         request_ids = globals().get("plan_request_ids")
         team = globals().get("team_lock")
@@ -216,7 +219,7 @@ def save_task(task: Task):
         finally:
             temporary.unlink(missing_ok=True)
 
-
+# 通过任务id, 拿到任务
 def load_task(task_id: str) -> Task:
     with task_lock:
         data = json.loads(_task_path(task_id).read_text(encoding="utf-8"))
@@ -277,7 +280,7 @@ def _incomplete_dependencies(task: Task) -> list[str]:
             incomplete.append(dep_id)
     return incomplete
 
-
+# 认领任务
 def claim_task(task_id: str, owner: str = "agent") -> str:
     """Atomically claim one task and bind the owner's filesystem cwd."""
     with task_store_lock():
@@ -307,7 +310,8 @@ def claim_task(task_id: str, owner: str = "agent") -> str:
     print(f"  [claim] {task.subject} -> in_progress (owner: {owner})")
     return f"Claimed {task.id} ({task.subject})"
 
-
+# 队友说「我这个任务干完了」时调它。
+# 负责验证你真的有资格交,通过后把任务标记成 completed,再告诉你哪些原本被卡住的任务现在可以开始了
 def complete_task(task_id: str, owner: str = "agent") -> str:
     """Complete an assignment only when the caller owns it."""
     with task_store_lock():
@@ -430,7 +434,7 @@ def task_worktree_cwd(task: Task) -> tuple[Path, str | None]:
     path, error = _registered_worktree(task.worktree)
     return (path or WORKDIR), error
 
-
+# 返回当前的工作区, 如果没绑worktree, 就是WORKDIR, 绑了, WORKDIR/.worktrees/<name>/
 def assignment_cwd(owner: str) -> Path:
     with task_lock:
         assignment = teammate_assignments.get(owner)
@@ -453,21 +457,22 @@ def assignment_cwd(owner: str) -> Path:
             raise ValueError(f"Assignment cwd changed for task {task.id}")
         return cwd
 
-
+# 释放已完成任务的【租约】
 def release_completed_assignment(owner: str) -> bool:
     """Release a completed cwd lease only at a model turn boundary."""
-    with task_lock:
-        assignment = teammate_assignments.get(owner)
+    with task_lock: # # 保护租约表 + 任务文件
+        assignment = teammate_assignments.get(owner) 
         if not assignment:
             return False
-        task = load_task(str(assignment["task_id"]))
+        task = load_task(str(assignment["task_id"])) # 通过任务id, 加载任务
         if task.status != "completed" or task.owner != owner:
-            return False
-        teammate_assignments.pop(owner, None)
-        advance_assignment_version(owner)
-        if owner in globals().get("plan_gates", {}):
-            globals()["plan_gates"][owner] = "not_required"
-        return True
+            return False 
+        teammate_assignments.pop(owner, None) # 注销登记
+        advance_assignment_version(owner) # 废除权力
+        # 拿队友状态表(approved--计划批了, pending--交了计划,等 Lead 批, required -- 要求交计划,还没交)
+        if owner in globals().get("plan_gates", {}): 
+            globals()["plan_gates"][owner] = "not_required" # 将状态改成not_required
+        return True 
 
 
 def release_teammate_assignment(owner: str):
@@ -856,6 +861,7 @@ class MessageBus:
         self._lock = threading.RLock()
         self._changed = threading.Condition(self._lock)
 
+    # 获得特定agent的收件箱地址
     def _path(self, agent: str) -> Path:
         if not is_valid_agent_name(agent):
             raise ValueError(f"Invalid mailbox recipient: {agent!r}")
@@ -864,6 +870,7 @@ class MessageBus:
             raise ValueError(f"Mailbox path escapes directory: {agent!r}")
         return path
 
+    # 读agent的收件箱, 拿到消息列表
     def _read_unlocked(self, agent: str) -> list[dict]:
         inbox = self._path(agent)
         if not inbox.exists():
@@ -886,14 +893,16 @@ class MessageBus:
         print(f"  [bus] {from_agent} -> {to_agent}: "
               f"({msg_type}) {content[:50]}")
 
+    # 读信件, 拿到消息列表
     def read_inbox(self, agent: str) -> list[dict]:
         with self._lock:
             return self._read_unlocked(agent)
-
+        
+    # peek一下,看看有没有待收消息
     def peek(self, agent: str) -> bool:
         with self._lock:
-            inbox = self._path(agent)
-            return inbox.exists() and inbox.stat().st_size > 0
+            inbox = self._path(agent) # 得到收件箱
+            return inbox.exists() and inbox.stat().st_size > 0 # 确保收件箱的路径存在 且 箱子里有内容 合起来就是有待收消息吗
 
     def wait_for_messages(self, agent: str,
                           timeout: float | None = None) -> list[dict]:
@@ -912,19 +921,19 @@ class MessageBus:
 BUS = MessageBus()
 
 # working | waiting_approval | idle | stopping
-active_teammates: dict[str, str] = {}
-plan_gates: dict[str, str] = {}
-plan_request_ids: dict[str, str] = {}
+active_teammates: dict[str, str] = {} # 名册 + 生命周期状态
+plan_gates: dict[str, str] = {} # 每个队友的计划闸门
+plan_request_ids: dict[str, str] = {} # 一个反向索引（队友名 → 当前待批单号）
 team_lock = threading.RLock()
 
 
 @dataclass
 class ProtocolState:
-    request_id: str
-    type: str
-    sender: str
-    target: str
-    status: str
+    request_id: str # 单号
+    type: str # 
+    sender: str # 请求发起方（都是 'lead'）
+    target: str # 请求接收方（某队友名)
+    status: str # pending → approved/rejected 
     payload: str
     work_version: int | None = None
     task_id: str | None = None
@@ -940,7 +949,7 @@ def new_request_id() -> str:
         if request_id not in pending_requests:
             return request_id
 
-
+# 
 def match_response(response_type: str, request_id: str, approve: bool,
                    from_agent: str, to_agent: str) -> bool:
     """Match one protocol response to one pending request."""
@@ -966,20 +975,28 @@ def match_response(response_type: str, request_id: str, approve: bool,
     print(f"  [protocol] {request_id} -> {state.status}")
     return True
 
-
+# 处理lead信箱, 返回一个列表, 存消息内容
 def consume_lead_inbox() -> list[dict]:
     """Consume Lead events and update protocol state before model delivery."""
     msgs = BUS.read_inbox("lead")
+    # 消息格式是: msg = {"from": from_agent, "to": to_agent,
+    #                   "content": content, "type": msg_type,
+    #                   "ts": time.time(), "metadata": metadata or {}}
     for msg in msgs:
         metadata = msg.get("metadata", {})
         request_id = metadata.get("request_id", "")
-        if request_id and msg.get("type", "").endswith("_response"):
-            match_response(msg["type"], request_id,
-                           metadata.get("approve", False),
-                           msg.get("from", ""), msg.get("to", ""))
+
+        # type这个键的值都是xxx_response的这种字符串, 然后用endswith问是否是_response, 算是检查type是否正确
+        if request_id and msg.get("type", "").endswith("_response"): 
+            
+            # 把"一条应答消息"和"内存里那条原始请求"对上号
+            # 然后把请求状态从 pending 推进到 approved / rejected
+            match_response(msg["type"], request_id, 
+                           metadata.get("approve", False), 
+                           msg.get("from", ""), msg.get("to", "")) 
     return msgs
 
-
+# 把一批消息拼成一段统一格式的文本
 def format_team_events(msgs: list[dict]) -> str:
     lines = []
     for msg in msgs:
@@ -1119,7 +1136,7 @@ def _teammate_send_message(from_name: str, to: str, content: str) -> str:
 
 # -- Idle Task Discovery --
 
-IDLE_SCAN_INTERVAL = 2.0
+IDLE_SCAN_INTERVAL = 2.0 # 队友多久看一次任务板
 
 
 def scan_unclaimed_tasks() -> list[Task]:
@@ -1195,6 +1212,7 @@ class TeammateRuntime:
             "complete_task": self.complete,
         }
 
+    # 当前cwd
     def current_cwd(self) -> tuple[Path | None, str | None]:
         if self.name not in teammate_assignments:
             return None, "Error: Claim a Task before using workspace tools."
@@ -1239,6 +1257,8 @@ class TeammateRuntime:
         except FileNotFoundError:
             return f"Error: Task {task_id} not found"
 
+    # 处理四类消息
+    # 优先级:关机 > 计划审批 > 普通消息
     def handle_inbox(self, inbox: list[dict]) -> bool:
         """Append work messages and return True for a valid shutdown."""
         work_messages = []
@@ -1268,6 +1288,10 @@ class TeammateRuntime:
                                   "content": "\n".join(work_messages)})
         return False
 
+    # 发一次模型请求 → 模型要调工具 → 调完再来一轮(continue)
+    #               → 模型只说了话 → 这轮活干完了(idle)
+    #               → 收到关机 / 报错 → 退出(stop)
+    # 自己只跑一轮, 循环在外面的 run() 里
     def work(self) -> str:
         """Run one model turn. Return continue, idle, or stop."""
         if self.handle_inbox(BUS.read_inbox(self.name)):
@@ -1385,22 +1409,24 @@ def spawn_teammate_thread(name: str, role: str, prompt: str,
                           task_id: str | None = None,
                           require_plan: bool = False) -> str:
     """Claim an initial Task, then start one persistent teammate."""
-    if not is_valid_agent_name(name):
+    if not is_valid_agent_name(name):  # agent的名字必须合法
         return ("Invalid teammate name: use 1-64 letters, digits, "
                 "underscores, or dashes")
-    if name.lower() in RESERVED_TEAMMATE_NAMES:
+    if name.lower() in RESERVED_TEAMMATE_NAMES: # 两个固定字符串的黑名单(不要和lead撞名, agent是lead的owner名)
         return f"Invalid teammate name: '{name}' is reserved by the runtime"
+
     with team_lock:
         if any(existing.casefold() == name.casefold()
-               for existing in active_teammates):
-            return f"Teammate '{name}' already exists"
-        active_teammates[name] = "working"
+               for existing in active_teammates): # 遍历名册上所有的键, 同时大小写不敏感比较
+            return f"Teammate '{name}' already exists" # 如果有重名
+        active_teammates[name] = "working" # 将名册中的状态改为working
+        # 如果有require_plan, 设置闸门
         plan_gates[name] = "required" if require_plan else "not_required"
         assignment_versions[name] = 0
 
     if task_id:
         try:
-            claimed = claim_task(task_id, owner=name)
+            claimed = claim_task(task_id, owner=name) # 认领任务
         except (FileNotFoundError, ValueError) as exc:
             claimed = f"Error: {exc}"
         if not claimed.startswith("Claimed "):
@@ -1411,7 +1437,7 @@ def spawn_teammate_thread(name: str, role: str, prompt: str,
             return f"Cannot spawn teammate '{name}': {claimed}"
 
     runtime = TeammateRuntime(name, role, prompt, task_id, require_plan)
-    thread = threading.Thread(target=runtime.run, daemon=True)
+    thread = threading.Thread(target=runtime.run, daemon=True) 
     with team_lock:
         teammate_threads[name] = thread
     thread.start()
@@ -1507,6 +1533,7 @@ def run_create_worktree(name: str, task_id: str) -> str:
 
 # -- Tool Definitions --
 
+# 基本五个工具: bash, read_file, write_file, edit_file, glob
 BASE_TOOLS = [
     {"name": "bash", "description": "Run a shell command.",
      "input_schema": {"type": "object",
@@ -1534,6 +1561,7 @@ BASE_TOOLS = [
                       "required": ["pattern"]}},
 ]
 
+# 任务工具
 TASK_TOOLS = [
     {"name": "create_task",
      "description": "Create a task and return its runtime-generated ID.",
@@ -1572,22 +1600,23 @@ TASK_TOOLS = [
                       "required": ["task_id"]}},
 ]
 
+# 团队成员可以使用的工具
 TEAMMATE_TOOLS = [
     *BASE_TOOLS,
-    {"name": "send_message",
+    {"name": "send_message", # 发消息给 lead，或任意活着的队友
      "description": "Send an intermediate message to 'lead' or an active teammate.",
      "input_schema": {"type": "object",
                       "properties": {"to": {"type": "string"},
                                      "content": {"type": "string"}},
                       "required": ["to", "content"]}},
-    {"name": "submit_plan",
+    {"name": "submit_plan", #提交计划
      "description": "Submit a work plan for Lead approval.",
      "input_schema": {"type": "object",
                       "properties": {"plan": {"type": "string"}},
                       "required": ["plan"]}},
-    next(tool for tool in TASK_TOOLS if tool["name"] == "list_tasks"),
-    next(tool for tool in TASK_TOOLS if tool["name"] == "claim_task"),
-    next(tool for tool in TASK_TOOLS if tool["name"] == "complete_task"),
+    next(tool for tool in TASK_TOOLS if tool["name"] == "list_tasks"), # 看全队看板
+    next(tool for tool in TASK_TOOLS if tool["name"] == "claim_task"), # 认领任务
+    next(tool for tool in TASK_TOOLS if tool["name"] == "complete_task"), # 完成任务
 ]
 
 TEAM_TOOLS = [
@@ -1678,10 +1707,8 @@ DESTRUCTIVE = ["rm ", "> /etc/", "chmod 777"]
 def contains_destructive_command(command: str) -> bool:
     return bool(DESTRUCTIVE_COMMAND_WORD.search(command))
 
-
 def register_hook(event: str, callback):
     HOOKS[event].append(callback)
-
 
 def trigger_hooks(event: str, *args, skip_permission: bool = False):
     for callback in HOOKS[event]:
@@ -1691,7 +1718,6 @@ def trigger_hooks(event: str, *args, skip_permission: bool = False):
         if result is not None:
             return result
     return None
-
 
 def check_permission(block, prompt_user: bool = True) -> str | None:
     if block.name == "bash":
@@ -1717,7 +1743,6 @@ def check_permission(block, prompt_user: bool = True) -> str | None:
             if input("Allow? [y/N] ").strip().lower() not in {"y", "yes"}:
                 return "Permission denied by user"
     return None
-
 
 def permission_hook(block):
     return check_permission(block, prompt_user=True)
@@ -1761,7 +1786,7 @@ register_hook("PreToolUse", log_hook)
 register_hook("PostToolUse", large_output_hook)
 register_hook("Stop", summary_hook)
 
-
+# 执行工具
 def execute_tool(block) -> str:
     blocked = trigger_hooks("PreToolUse", block)
     if blocked:
@@ -1822,7 +1847,7 @@ def agent_loop(messages: list):
             })
         messages.append({"role": "user", "content": results})
 
-
+# 打印最后会话
 def print_last_assistant_message(history: list):
     if not history:
         return
@@ -1832,19 +1857,19 @@ def print_last_assistant_message(history: list):
         elif isinstance(block, dict) and block.get("type") == "text":
             print(block.get("text", ""))
 
-
-def wait_for_cli_event() -> tuple[str, str | None]:  # 返回的第一个是字符串, 第二个是字符串或者空
+def wait_for_cli_event() -> tuple[str, str | None]:  # 第一个参数的返回值就是"该处理哪一路"的路由标签
     prompt_visible = False # 记录是否出现 提示符 s13 >>
     while True:
-        if BUS.peek("lead"):
-            if prompt_visible:
-                print()
-            return "wake", None
-        if not prompt_visible:
+        if BUS.peek("lead"): # 看lead的收件箱有没有信息
+            if prompt_visible: 
+                print() # 提示符 s13 >> 后面就是用户敲字的地方, 这里打印空, 是为了隔离用户和系统输出
+            return "wake", None # 叫醒wake, 你收到信了, 该处理事情了
+        
+        if not prompt_visible: # 如果没有 提示符, 打印
             print("s13 >> ", end="", flush=True)
             prompt_visible = True
-        readable, _, _ = select.select([sys.stdin], [], [], 0.25)
-        if readable:
+        readable, _, _ = select.select([sys.stdin], [], [], 0.25)  # 键盘有输入吗？（因为是个循环, 所以最多等 0.25s, 然后回头看）
+        if readable: # 如果用户输入了
             line = sys.stdin.readline()
             if line == "":
                 return "quit", None
@@ -1855,32 +1880,32 @@ if __name__ == "__main__":
     print("s13: agent teams")
     print("Enter a question, press Enter to send. Type q to quit.\n")
     history = []
-    had_teammates = False
+    had_teammates = False # 有成员
 
     while True:
-        kind, payload = wait_for_cli_event()
-        if kind == "quit":
-            break
+        kind, payload = wait_for_cli_event() 
+        if kind == "quit": # 退出
+            break 
         if kind == "user":
-            if payload is None or payload.strip().lower() in {"q", "exit", ""}:
+            if payload is None or payload.strip().lower() in {"q", "exit", ""}: # 如果内容是以上之一, 也退出
                 break
-            trigger_hooks("UserPromptSubmit", payload)
-            history.append({"role": "user", "content": payload})
-        else:
-            inbox = consume_lead_inbox()
+            trigger_hooks("UserPromptSubmit", payload) # 输入前检查
+            history.append({"role": "user", "content": payload}) # 正常加入历史
+        else: # 如果是weak, 唤醒lead
+            inbox = consume_lead_inbox() # 用局部变量拿到lead里的消息
             if not inbox:
                 continue
-            history.append({
+            history.append({ # 拼成一段文本, 塞到模型中
                 "role": "user",
                 "content": format_team_events(inbox),
             })
             print(f"[wake: {len(inbox)} team event(s) -> new turn]")
 
-        agent_loop(history)
+        agent_loop(history) # agentloop
         print_last_assistant_message(history)
 
         if active_teammates:
-            had_teammates = True
+            had_teammates = True # 有成员
         elif had_teammates and not BUS.peek("lead"):
             print("[all teammates shut down]")
             had_teammates = False
