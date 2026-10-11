@@ -166,12 +166,12 @@ BASE_HANDLERS = {
 
 
 # -- New in s14: MCP discovery and dispatch --
-
+# 
 class MCPClient:
     """Small in-process stand-in for MCP tools/list and tools/call."""
 
     def __init__(self, name: str):
-        self.name = name
+        self.name = name 
         self.tools: list[dict] = []
         self._handlers: dict[str, callable] = {}
 
@@ -217,7 +217,7 @@ def normalize_mcp_name(name: str) -> str:
         raise ValueError("MCP names cannot normalize to an empty string")
     return normalized
 
-
+# MCP server 替代品
 def _mock_server_docs() -> MCPClient:
     server = MCPClient("docs")
     server.register(
@@ -348,7 +348,7 @@ def assemble_tool_pool() -> tuple[list[dict], dict[str, callable]]:
             schema = tool_def.get("inputSchema", {})
             if not isinstance(schema, dict) or schema.get("type", "object") != "object":
                 raise ValueError(f"Invalid input schema for {origin}")
-            origins[prefixed] = origin
+            origins[prefixed] = origin # 将MCP工具和普通工具在origins里区分
             tools.append({
                 "name": prefixed,
                 "description": tool_def.get("description", ""),
